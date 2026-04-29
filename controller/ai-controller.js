@@ -1,7 +1,7 @@
-// AI Controller — generates questions and explanations via Gemini API
+// AI Controller — generates questions and explanations via Groq API (Llama 3)
 // Supports difficulty levels, custom topics, and MCQ format
 
-import { GoogleGenAI } from "@google/genai";
+import Groq from "groq-sdk";
 import Question from "../models/question-model.js";
 import Session from "../models/session-model.js";
 import {
@@ -14,13 +14,55 @@ import {
 } from "../utils/prompts-util.js";
 
 const getAiClient = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GROQ_API_KEY;
 
-  if (!apiKey || apiKey === "replace-with-your-gemini-api-key") {
+  if (!apiKey || apiKey === "replace-with-your-groq-api-key") {
     return null;
   }
 
-  return new GoogleGenAI({ apiKey });
+  return new Groq({ apiKey });
+};
+
+// Helper to call Groq and get text response
+const generateWithGroq = async (client, prompt) => {
+  const response = await client.chat.completions.create({
+    model: "llama-3.3-70b-versatile",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a helpful AI assistant. Always respond with valid JSON only. No extra text outside the JSON.",
+      },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.7,
+    max_tokens: 4096,
+  });
+
+  return response.choices[0]?.message?.content || "";
+};
+
+// Helper to parse JSON from AI response
+const parseJsonResponse = (rawText) => {
+  const cleanedText = rawText
+    .replace(/^```json\s*/, "")
+    .replace(/^```\s*/, "")
+    .replace(/```$/, "")
+    .replace(/^json\s*/, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleanedText);
+  } catch {
+    // Try to extract JSON array or object from the text
+    const arrayMatch = cleanedText.match(/\[[\s\S]*\]/);
+    if (arrayMatch) return JSON.parse(arrayMatch[0]);
+
+    const objectMatch = cleanedText.match(/\{[\s\S]*\}/);
+    if (objectMatch) return JSON.parse(objectMatch[0]);
+
+    throw new Error("Failed to parse AI response as JSON");
+  }
 };
 
 // @desc    Generate + save interview questions for a session
@@ -65,34 +107,8 @@ export const generateInterviewQuestions = async (req, res) => {
     let questions;
 
     if (ai) {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-      });
-
-      const parts = response.candidates?.[0]?.content?.parts ?? [];
-      const rawText = parts
-        .filter((p) => !p.thought)
-        .map((p) => p.text ?? "")
-        .join("");
-
-      const cleanedText = rawText
-        .replace(/^```json\s*/, "")
-        .replace(/^```\s*/, "")
-        .replace(/```$/, "")
-        .replace(/^json\s*/, "")
-        .trim();
-
-      try {
-        questions = JSON.parse(cleanedText);
-      } catch {
-        const jsonMatch = cleanedText.match(/[\s\S]*\]/);
-        if (jsonMatch) {
-          questions = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error("Failed to parse AI response as JSON");
-        }
-      }
+      const rawText = await generateWithGroq(ai, prompt);
+      questions = parseJsonResponse(rawText);
     } else {
       questions = generateFallbackQuestions({
         role: session.role,
@@ -154,28 +170,8 @@ export const generateConceptExplanation = async (req, res) => {
     let explanation;
 
     if (ai) {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash-lite",
-        contents: prompt,
-      });
-
-      const cleanedText = response.text
-        .replace(/^```json\s*/, "")
-        .replace(/^```\s*/, "")
-        .replace(/```$/, "")
-        .replace(/^json\s*/, "")
-        .trim();
-
-      try {
-        explanation = JSON.parse(cleanedText);
-      } catch {
-        const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          explanation = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error("Failed to parse AI response as JSON");
-        }
-      }
+      const rawText = await generateWithGroq(ai, prompt);
+      explanation = parseJsonResponse(rawText);
     } else {
       explanation = generateFallbackExplanation(question);
     }
